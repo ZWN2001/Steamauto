@@ -7,6 +7,8 @@ import os
 
 import apprise
 import requests
+from flask_socketio import SocketIO
+import api.Result as Result
 from apprise.AppriseAsset import AppriseAsset
 from requests.exceptions import ProxyError
 from steampy.exceptions import InvalidCredentials, ConfirmationExpected
@@ -29,10 +31,10 @@ from utils.logger import handle_caught_exception
 class BuffAutoAcceptOffer:
     buff_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/105.0.0.0 Safari/537.36 Edg/105.0.1343.27",
+                      "Chrome/105.0.0.0 Safari/537.36 Edg/105.0.1343.27",
     }
 
-    def __init__(self, logger, steam_client, steam_client_mutex, config):
+    def __init__(self, logger, steam_client, steam_client_mutex, config, socketio):
         self.logger = logger
         self.steam_client = steam_client
         self.steam_client_mutex = steam_client_mutex
@@ -41,6 +43,7 @@ class BuffAutoAcceptOffer:
         self.asset = AppriseAsset(plugin_paths=[os.path.join(os.path.dirname(__file__), "..", APPRISE_ASSET_FOLDER)])
         self.lowest_on_sale_price_cache = {}
         self.order_info = {}
+        self.socketio = socketio
 
     def init(self) -> bool:
         if get_valid_session_for_buff(self.steam_client, self.logger) == "":
@@ -101,6 +104,7 @@ class BuffAutoAcceptOffer:
         protection_price = self.config["buff_auto_accept_offer"]["protection_price"]
         if sell_protection:
             self.logger.info("[BuffAutoAcceptOffer] 正在检查交易金额...")
+            SocketIO.send(self.socketio, Result.Result(0, "正在检查交易金额...").to_json())
             goods_id = str(list(trade["goods_infos"].keys())[0])
             price = float(self.order_info[trade["tradeofferid"]]["price"])
             other_lowest_price = -1
@@ -109,10 +113,12 @@ class BuffAutoAcceptOffer:
             ] >= datetime.datetime.now() - datetime.timedelta(hours=1):
                 other_lowest_price = self.lowest_on_sale_price_cache[goods_id]["price"]
                 self.logger.info("[BuffAutoAcceptOffer] 从缓存中获取最低价格: " + str(other_lowest_price))
+                SocketIO.send(self.socketio, Result.Result(0, "从缓存中获取最低价格: " + str(other_lowest_price)).to_json())
             if other_lowest_price == -1:
                 # 只检查第一个物品的价格, 多个物品为批量购买, 理论上批量上架的价格应该是一样的
                 if trade["tradeofferid"] not in self.order_info:
                     self.logger.error("[BuffAutoAcceptOffer] 无法获取交易金额, 跳过此交易报价")
+                    SocketIO.send(self.socketio, Result.Result(2, "无法获取交易金额, 跳过此交易报价").to_json())
                     return False
                 if self.development_mode and os.path.exists(SHOP_LISTING_DEV_FILE_PATH):
                     self.logger.info("[BuffAutoAcceptOffer] 开发者模式已开启, 使用本地价格数据")
@@ -121,22 +127,25 @@ class BuffAutoAcceptOffer:
                 else:
                     time.sleep(5)
                     shop_listing_url = (
-                        "https://buff.163.com/api/market/goods/sell_order?game="
-                        + trade["game"]
-                        + "&goods_id="
-                        + goods_id
-                        + "&page_num=1&sort_by=default&mode=&allow_tradable_cooldown=1"
+                            "https://buff.163.com/api/market/goods/sell_order?game="
+                            + trade["game"]
+                            + "&goods_id="
+                            + goods_id
+                            + "&page_num=1&sort_by=default&mode=&allow_tradable_cooldown=1"
                     )
                     resp = requests.get(shop_listing_url, headers=self.buff_headers)
                     resp_json = resp.json()
                     if self.development_mode:
                         self.logger.info("[BuffAutoAcceptOffer] 开发者模式, 保存价格信息到本地")
-                        with open(SHOP_LISTING_DEV_FILE_PATH, "w", encoding=get_encoding(SHOP_LISTING_DEV_FILE_PATH)) as f:
+                        with open(SHOP_LISTING_DEV_FILE_PATH, "w",
+                                  encoding=get_encoding(SHOP_LISTING_DEV_FILE_PATH)) as f:
                             f.write(json.dumps(resp_json, indent=4))
                 other_lowest_price = float(resp_json["data"]["items"][0]["price"])
-                self.lowest_on_sale_price_cache[goods_id] = {"price": other_lowest_price, "cache_time": datetime.datetime.now()}
+                self.lowest_on_sale_price_cache[goods_id] = {"price": other_lowest_price,
+                                                             "cache_time": datetime.datetime.now()}
             if price < other_lowest_price * protection_price_percentage and other_lowest_price > protection_price:
                 self.logger.error("[BuffAutoAcceptOffer] 交易金额过低, 跳过此交易报价")
+                SocketIO.send(self.socketio, Result.Result(2, "交易金额过低, 跳过此交易报价").to_json())
                 if "protection_notification" in self.config["buff_auto_accept_offer"]:
                     apprise_obj = apprise.Apprise(asset=self.asset)
                     for server in self.config["buff_auto_accept_offer"]["servers"]:
@@ -144,21 +153,27 @@ class BuffAutoAcceptOffer:
                     if self.order_info == {}:
                         self.get_order_info([trade])
                     apprise_obj.notify(
-                        title=self.format_str(self.config["buff_auto_accept_offer"]["protection_notification"]["title"], trade),
-                        body=self.format_str(self.config["buff_auto_accept_offer"]["protection_notification"]["body"], trade),
+                        title=self.format_str(self.config["buff_auto_accept_offer"]["protection_notification"]["title"],
+                                              trade),
+                        body=self.format_str(self.config["buff_auto_accept_offer"]["protection_notification"]["body"],
+                                             trade),
                     )
                 return False
         return True
 
     def exec(self):
         self.logger.info("[BuffAutoAcceptOffer] BUFF自动接受报价插件已启动.请稍候...")
+        SocketIO.send(self.socketio, Result.Result(0, "BUFF自动接受报价插件已启动.请稍候...").to_json())
         self.logger.info("[BuffAutoAcceptOffer] 正在准备登录至BUFF...")
+        SocketIO.send(self.socketio, Result.Result(0, "正在准备登录至BUFF...").to_json())
         with open(BUFF_COOKIES_FILE_PATH, "r", encoding=get_encoding(BUFF_COOKIES_FILE_PATH)) as f:
             self.buff_headers["Cookie"] = f.read().replace("\n", "").split(";")[0]
         self.logger.info("[BuffAutoAcceptOffer] 已检测到cookies, 尝试登录")
+        SocketIO.send(self.socketio, Result.Result(0, "已检测到cookies, 尝试登录").to_json())
         user_name = self.check_buff_account_state(dev=self.development_mode)
         if not user_name:
             self.logger.error("[BuffAutoAcceptOffer] 由于登录失败,插件自动退出")
+            SocketIO.send(self.socketio, Result.Result(2, "由于登录失败,插件自动退出").to_json())
             exit_code.set(1)
             return 1
         self.logger.info("[BuffAutoAcceptOffer] 已经登录至BUFF 用户名: " + user_name)
@@ -169,20 +184,26 @@ class BuffAutoAcceptOffer:
                 with self.steam_client_mutex:
                     if not self.steam_client.is_session_alive():
                         self.logger.info("[BuffAutoAcceptOffer] Steam会话已过期, 正在重新登录...")
+                        SocketIO.send(self.socketio, Result.Result(0, "Steam会话已过期, 正在重新登录...").to_json())
                         self.steam_client._session.cookies.clear()
                         self.steam_client.login(
-                            self.steam_client.username, self.steam_client._password, json.dumps(self.steam_client.steam_guard)
+                            self.steam_client.username, self.steam_client._password,
+                            json.dumps(self.steam_client.steam_guard)
                         )
                         self.logger.info("[BuffAutoAcceptOffer] Steam会话已更新")
+                        SocketIO.send(self.socketio, Result.Result(0, "Steam会话已更新").to_json())
                         steam_session_path = os.path.join(SESSION_FOLDER, self.steam_client.username.lower() + ".pkl")
                         with open(steam_session_path, "wb") as f:
                             pickle.dump(self.steam_client.session, f)
                 self.logger.info("[BuffAutoAcceptOffer] 正在进行BUFF待发货/待收货饰品检查...")
+                SocketIO.send(self.socketio, Result.Result(0, "正在进行BUFF待发货/待收货饰品检查...").to_json())
                 username = self.check_buff_account_state()
                 if username == "":
                     self.logger.info('[BuffAutoAcceptOffer] BUFF账户登录状态失效, 尝试重新登录...')
+                    SocketIO.send(self.socketio, Result.Result(0, "BUFF账户登录状态失效, 尝试重新登录...").to_json())
                     if get_valid_session_for_buff(self.steam_client, self.logger) == "":
                         self.logger.error("[BuffAutoAcceptOffer] BUFF账户登录状态失效, 无法自动重新登录! ")
+                        SocketIO.send(self.socketio, Result.Result(2, "BUFF账户登录状态失效, 无法自动重新登录! ").to_json())
                         if "buff_cookie_expired_notification" in self.config["buff_auto_accept_offer"]:
                             apprise_obj = apprise.Apprise()
                             for server in self.config["buff_auto_accept_offer"]["servers"]:
@@ -195,7 +216,8 @@ class BuffAutoAcceptOffer:
                 if self.development_mode and os.path.exists(MESSAGE_NOTIFICATION_DEV_FILE_PATH):
                     self.logger.info("[BuffAutoAcceptOffer] 开发者模式已开启, 使用本地消息通知文件")
                     with open(
-                        MESSAGE_NOTIFICATION_DEV_FILE_PATH, "r", encoding=get_encoding(MESSAGE_NOTIFICATION_DEV_FILE_PATH)
+                            MESSAGE_NOTIFICATION_DEV_FILE_PATH, "r",
+                            encoding=get_encoding(MESSAGE_NOTIFICATION_DEV_FILE_PATH)
                     ) as f:
                         message_notification = json.load(f)
                         to_deliver_order = message_notification["data"]["to_deliver_order"]
@@ -206,13 +228,14 @@ class BuffAutoAcceptOffer:
                     if self.development_mode:
                         self.logger.info("[BuffAutoAcceptOffer] 开发者模式, 保存发货信息到本地")
                         with open(
-                            MESSAGE_NOTIFICATION_DEV_FILE_PATH, "w", encoding=get_encoding(MESSAGE_NOTIFICATION_DEV_FILE_PATH)
+                                MESSAGE_NOTIFICATION_DEV_FILE_PATH, "w",
+                                encoding=get_encoding(MESSAGE_NOTIFICATION_DEV_FILE_PATH)
                         ) as f:
                             f.write(json.dumps(response_json, indent=4))
                     to_deliver_order = response_json["data"]["to_deliver_order"]
                 try:
                     if ("csgo" in to_deliver_order and int(to_deliver_order["csgo"]) != 0) or (
-                        "dota2" in to_deliver_order and int(to_deliver_order["dota2"]) != 0
+                            "dota2" in to_deliver_order and int(to_deliver_order["dota2"]) != 0
                     ):
                         self.logger.info(
                             "[BuffAutoAcceptOffer] 检测到"
@@ -222,15 +245,36 @@ class BuffAutoAcceptOffer:
                             )
                             + "个待发货请求! "
                         )
+                        SocketIO.send(
+                            self.socketio,
+                            Result.Result(
+                                0,
+                                "检测到"
+                                + str(
+                                    (0 if "csgo" not in to_deliver_order else int(to_deliver_order["csgo"]))
+                                    + (0 if "dota2" not in to_deliver_order else int(to_deliver_order["dota2"]))
+                                )
+                                + "个待发货请求! ",
+                            ).to_json(),
+                        )
                         self.logger.info("[BuffAutoAcceptOffer] CSGO待发货: " +
                                          str((0 if "csgo" not in to_deliver_order
                                               else int(to_deliver_order["csgo"]))) + "个")
+                        SocketIO.send(self.socketio, Result.Result(0, "CSGO待发货: " +
+                                                                   str((0 if "csgo" not in to_deliver_order
+                                                                        else int(to_deliver_order["csgo"])))
+                                                                   + "个").to_json())
                         self.logger.info("[BuffAutoAcceptOffer] DOTA2待发货: " +
                                          str(0 if "dota2" not in to_deliver_order
                                              else int(to_deliver_order["dota2"])) + "个")
+                        SocketIO.send(self.socketio, Result.Result(0, "DOTA2待发货: " +
+                                                                     str(0 if "dota2" not in to_deliver_order
+                                                                            else int(to_deliver_order["dota2"])))
+                                        .to_json())
                 except TypeError as e:
                     handle_caught_exception(e)
                     self.logger.error("[BuffAutoAcceptOffer] Buff接口返回数据异常! 请检查网络连接或稍后再试! ")
+                    SocketIO.send(self.socketio, Result.Result(2, "Buff接口返回数据异常! 请检查网络连接或稍后再试! ").to_json())
                 trade_supply = {}
                 if self.development_mode and os.path.exists(STEAM_TRADE_DEV_FILE_PATH):
                     self.logger.info("[BuffAutoAcceptOffer] 开发者模式已开启, 使用本地待发货文件")
@@ -242,7 +286,8 @@ class BuffAutoAcceptOffer:
                     ).json()
                     if self.development_mode:
                         self.logger.info("[BuffAutoAcceptOffer] 开发者模式, 保存待发货信息到本地")
-                        with open(STEAM_TRADE_DEV_FILE_PATH, "w", encoding=get_encoding(STEAM_TRADE_DEV_FILE_PATH)) as f:
+                        with open(STEAM_TRADE_DEV_FILE_PATH, "w",
+                                  encoding=get_encoding(STEAM_TRADE_DEV_FILE_PATH)) as f:
                             f.write(json.dumps(response_json, indent=4))
                     trades = response_json["data"]
                 trade_offer_to_confirm = set()
@@ -250,9 +295,9 @@ class BuffAutoAcceptOffer:
                     if self.development_mode and os.path.exists(TO_DELIVER_DEV_FILE_PATH.format(game=game["game"])):
                         self.logger.info("[BuffAutoAcceptOffer] 开发者模式已开启, 使用本地待确认供应文件")
                         with open(
-                            TO_DELIVER_DEV_FILE_PATH.format(game=game["game"]),
-                            "r",
-                            encoding=get_encoding(TO_DELIVER_DEV_FILE_PATH).format(game=game["game"]),
+                                TO_DELIVER_DEV_FILE_PATH.format(game=game["game"]),
+                                "r",
+                                encoding=get_encoding(TO_DELIVER_DEV_FILE_PATH).format(game=game["game"]),
                         ) as f:
                             trade_supply[game["game"]] = json.load(f)["data"]["items"]
                             for trade_offer in trade_supply[game["game"]]:
@@ -268,9 +313,9 @@ class BuffAutoAcceptOffer:
                         if self.development_mode:
                             self.logger.info("[BuffAutoAcceptOffer] 开发者模式, 保存待确认供应信息到本地")
                             with open(
-                                TO_DELIVER_DEV_FILE_PATH.format(game=game["game"]),
-                                "w",
-                                encoding=get_encoding(TO_DELIVER_DEV_FILE_PATH).format(game=game["game"]),
+                                    TO_DELIVER_DEV_FILE_PATH.format(game=game["game"]),
+                                    "w",
+                                    encoding=get_encoding(TO_DELIVER_DEV_FILE_PATH).format(game=game["game"]),
                             ) as f:
                                 f.write(json.dumps(response_json, indent=4))
                         trade_supply[game["game"]] = response_json["data"]["items"]
@@ -278,11 +323,17 @@ class BuffAutoAcceptOffer:
                             if trade_offer["tradeofferid"] is not None and trade_offer["tradeofferid"] != "":
                                 trade_offer_to_confirm.add(trade_offer["tradeofferid"])
                         self.logger.info("[BuffAutoAcceptOffer] 为了避免访问接口过于频繁，休眠5秒...")
+                        SocketIO.send(self.socketio, Result.Result(0, "为了避免访问接口过于频繁，休眠5秒...").to_json())
                         time.sleep(5)
                 self.logger.info("[BuffAutoAcceptOffer] 查找到 " + str(len(trades)) + " 个待处理的BUFF未发货订单! ")
+                SocketIO.send(self.socketio, Result.Result(0, "查找到 " + str(len(trades)) + " 个待处理的BUFF未发货订单! ")
+                                .to_json())
                 self.logger.info(
-                    "[BuffAutoAcceptOffer] 查找到 " + str(len(trade_offer_to_confirm) - len(trades)) + " 个待处理的BUFF待确认供应订单! "
+                    "[BuffAutoAcceptOffer] 查找到 " + str(
+                        len(trade_offer_to_confirm) - len(trades)) + " 个待处理的BUFF待确认供应订单! "
                 )
+                SocketIO.send(self.socketio, Result.Result(0, "查找到 " + str(
+                    len(trade_offer_to_confirm) - len(trades)) + " 个待处理的BUFF待确认供应订单! ").to_json())
                 for game in trade_supply:
                     for trade in trade_supply[game]:
                         self.order_info[trade["tradeofferid"]] = trade
@@ -296,11 +347,14 @@ class BuffAutoAcceptOffer:
                                 trade_offer_to_confirm.remove(offer_id)
                                 # offer_id会同时在2个接口中出现, 移除重复的offer_id
                             self.logger.info("[BuffAutoAcceptOffer] 正在处理第 " + str(i) + " 个交易报价 报价ID" + str(offer_id))
+                            SocketIO.send(self.socketio, Result.Result(0, "正在处理第 " + str(i) + " 个交易报价 报价ID" + str(offer_id))
+                                            .to_json())
                             if offer_id not in ignored_offer:
                                 try:
                                     if not self.should_accept_offer(trade):
                                         continue
                                     self.logger.info("[BuffAutoAcceptOffer] 正在检查报价物品...")
+                                    SocketIO.send(self.socketio, Result.Result(0, "正在检查报价物品...").to_json())
                                     if not self.development_mode:
                                         with self.steam_client_mutex:
                                             offer = self.steam_client.get_trade_offer(offer_id)
@@ -320,31 +374,39 @@ class BuffAutoAcceptOffer:
                                                 break
                                             if not match:
                                                 self.logger.error("[BuffAutoAcceptOffer] 报价中的物品不在待发货列表中, 跳过接受报价")
-                                                if "item_mismatch_notification" in self.config["buff_auto_accept_offer"]:
+                                                SocketIO.send(self.socketio, Result.Result(0, "报价中的物品不在待发货列表中, 跳过接受报价")
+                                                                .to_json())
+                                                if "item_mismatch_notification" in self.config[
+                                                    "buff_auto_accept_offer"]:
                                                     apprise_obj = apprise.Apprise()
                                                     for server in self.config["buff_auto_accept_offer"]["servers"]:
                                                         apprise_obj.add(server)
                                                     apprise_obj.notify(
                                                         title=self.format_str(
-                                                            self.config["buff_auto_accept_offer"]["item_mismatch_notification"][
+                                                            self.config["buff_auto_accept_offer"][
+                                                                "item_mismatch_notification"][
                                                                 "title"
                                                             ],
                                                             trade,
                                                         ),
                                                         body=self.format_str(
-                                                            self.config["buff_auto_accept_offer"]["item_mismatch_notification"][
+                                                            self.config["buff_auto_accept_offer"][
+                                                                "item_mismatch_notification"][
                                                                 "body"
                                                             ],
                                                             trade,
                                                         ),
                                                     )
                                                 if trades.index(trade) != len(trades) - 1:
-                                                    self.logger.info("[BuffAutoAcceptOffer] 为了避免频繁访问Steam接口, 等待5秒后继续...")
+                                                    self.logger.info(
+                                                        "[BuffAutoAcceptOffer] 为了避免频繁访问Steam接口, 等待5秒后继续...")
+                                                    SocketIO.send(self.socketio, Result.Result(0, "为了避免频繁访问Steam接口, 等待5秒后继续...").to_json())
                                                     time.sleep(5)
                                                 continue
                                     else:
                                         self.logger.info("[BuffAutoAcceptOffer] 开发者模式已开启, 跳过报价物品检查")
                                     self.logger.info("[BuffAutoAcceptOffer] 报价物品检查完成! 正在接受报价...")
+                                    SocketIO.send(self.socketio, Result.Result(0, "报价物品检查完成! 正在接受报价...").to_json())
                                     if self.development_mode:
                                         self.logger.info("[BuffAutoAcceptOffer] 开发者模式已开启, 跳过接受报价")
                                     else:
@@ -354,28 +416,35 @@ class BuffAutoAcceptOffer:
                                         except KeyError as e:
                                             handle_caught_exception(e)
                                             self.logger.error("[BuffAutoAcceptOffer] Steam网络异常, 暂时无法接受报价, 请稍后再试! ")
+                                            SocketIO.send(self.socketio, Result.Result(2, "Steam网络异常, 暂时无法接受报价, 请稍后再试! ").to_json())
                                     ignored_offer.append(offer_id)
                                     self.logger.info("[BuffAutoAcceptOffer] 接受完成! 已经将此交易报价加入忽略名单! ")
+                                    SocketIO.send(self.socketio, Result.Result(0, "接受完成! 已经将此交易报价加入忽略名单! ").to_json())
                                     if "sell_notification" in self.config["buff_auto_accept_offer"]:
                                         apprise_obj = apprise.Apprise()
                                         for server in self.config["buff_auto_accept_offer"]["servers"]:
                                             apprise_obj.add(server)
                                         apprise_obj.notify(
                                             title=self.format_str(
-                                                self.config["buff_auto_accept_offer"]["sell_notification"]["title"], trade
+                                                self.config["buff_auto_accept_offer"]["sell_notification"]["title"],
+                                                trade
                                             ),
                                             body=self.format_str(
-                                                self.config["buff_auto_accept_offer"]["sell_notification"]["body"], trade
+                                                self.config["buff_auto_accept_offer"]["sell_notification"]["body"],
+                                                trade
                                             ),
                                         )
                                     if trades.index(trade) != len(trades) - 1:
                                         self.logger.info("[BuffAutoAcceptOffer] 为了避免频繁访问Steam接口, 等待5秒后继续...")
+                                        SocketIO.send(self.socketio, Result.Result(0, "为了避免频繁访问Steam接口, 等待5秒后继续...").to_json())
                                         time.sleep(5)
                                 except Exception as e:
                                     self.logger.error(e, exc_info=True)
                                     self.logger.info("[BuffAutoAcceptOffer] 出现错误, 稍后再试! ")
+                                    SocketIO.send(self.socketio, Result.Result(0, "出现错误, 稍后再试! ").to_json())
                             else:
                                 self.logger.info("[BuffAutoAcceptOffer] 该报价已经被处理过, 跳过.")
+                                SocketIO.send(self.socketio, Result.Result(0, "该报价已经被处理过, 跳过.").to_json())
                     for trade_offer_id in trade_offer_to_confirm:
                         if trade_offer_id not in ignored_offer:
                             if self.development_mode:
@@ -391,6 +460,7 @@ class BuffAutoAcceptOffer:
                                         self.logger.info(
                                             "[BuffAutoAcceptOffer] 令牌完成! ( " + trade_offer_id + " ) 已经将此交易报价加入忽略名单!"
                                         )
+                                        SocketIO.send(self.socketio, Result.Result(0, "令牌完成! ( " + trade_offer_id + " ) 已经将此交易报价加入忽略名单!").to_json())
                                     else:
                                         self.logger.info(
                                             "[BuffAutoAcceptOffer] 令牌未完成! ( "
@@ -399,6 +469,7 @@ class BuffAutoAcceptOffer:
                                             + str(offer["response"]["offer"]["trade_offer_state"])
                                             + " )"
                                         )
+                                        SocketIO.send(self.socketio, Result.Result(0, "令牌未完成! ( " + trade_offer_id + " ), 报价状态异常 (" + str(offer["response"]["offer"]["trade_offer_state"]) + " )").to_json())
                                 else:
                                     self.logger.info(
                                         "[BuffAutoAcceptOffer] 令牌未完成! ( "
@@ -407,32 +478,47 @@ class BuffAutoAcceptOffer:
                                         + str(offer["response"])
                                         + " )"
                                     )
+                                    SocketIO.send(self.socketio, Result.Result(0, "令牌未完成! ( " + (trade_offer_id if trade_offer_id else "None") + " ), 报价返回异常 (" + str(offer["response"]) + " )").to_json())
                             if list(trade_offer_to_confirm).index(trade_offer_id) != len(trade_offer_to_confirm) - 1:
                                 self.logger.info("[BuffAutoAcceptOffer] 为了避免频繁访问Steam接口, 等待5秒后继续...")
+                                SocketIO.send(self.socketio, Result.Result(0, "为了避免频繁访问Steam接口, 等待5秒后继续...").to_json())
                                 time.sleep(5)
                         else:
                             self.logger.info("[BuffAutoAcceptOffer] 该报价已经被处理过, 跳过.")
                 except ProxyError:
                     self.logger.error("[BuffAutoAcceptOffer] 代理异常, 本软件可不需要代理或任何VPN")
+                    SocketIO.send(self.socketio, Result.Result(2, "代理异常, 本软件可不需要代理或任何VPN").to_json())
                     self.logger.error("[BuffAutoAcceptOffer] 可以尝试关闭代理或VPN后重启软件")
+                    SocketIO.send(self.socketio, Result.Result(2, "可以尝试关闭代理或VPN后重启软件").to_json())
                 except (ConnectionError, ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError):
                     self.logger.error("[BuffAutoAcceptOffer] 网络异常, 请检查网络连接")
+                    SocketIO.send(self.socketio, Result.Result(2, "网络异常, 请检查网络连接").to_json())
                     self.logger.error("[BuffAutoAcceptOffer] 这个错误可能是由于代理或VPN引起的, 本软件可无需代理或任何VPN")
+                    SocketIO.send(self.socketio, Result.Result(2, "这个错误可能是由于代理或VPN引起的, 本软件可无需代理或任何VPN").to_json())
                     self.logger.error("[BuffAutoAcceptOffer] 如果你正在使用代理或VPN, 请尝试关闭后重启软件")
+                    SocketIO.send(self.socketio, Result.Result(2, "如果你正在使用代理或VPN, 请尝试关闭后重启软件").to_json())
                     self.logger.error("[BuffAutoAcceptOffer] 如果你没有使用代理或VPN, 请检查网络连接")
+                    SocketIO.send(self.socketio, Result.Result(2, "如果你没有使用代理或VPN, 请检查网络连接").to_json())
                 except InvalidCredentials as e:
                     self.logger.error("[BuffAutoAcceptOffer] mafile有问题, 请检查mafile是否正确(尤其是identity_secret)")
+                    SocketIO.send(self.socketio, Result.Result(2, "mafile有问题, 请检查mafile是否正确(尤其是identity_secret)").to_json())
                     self.logger.error(str(e))
+                    SocketIO.send(self.socketio, Result.Result(2, str(e)).to_json())
                 except ConfirmationExpected:
-                    self.logger.error("[UUAutoAcceptOffer] Steam Session已经过期, 请删除session文件夹并重启Steamauto")
+                    self.logger.error("[BuffAutoAcceptOffer] Steam Session已经过期, 请删除session文件夹并重启Steamauto")
+                    SocketIO.send(self.socketio, Result.Result(2, "Steam Session已经过期, 请删除session文件夹并重启Steamauto").to_json())
                 except ValueError as e:
                     self.logger.error("[BuffAutoAcceptOffer] Steam 宵禁限制, 请稍后再试!")
+                    SocketIO.send(self.socketio, Result.Result(2, "Steam 宵禁限制, 请稍后再试!").to_json())
                     handle_caught_exception(e)
                 except Exception as e:
                     self.logger.error(e, exc_info=True)
                     self.logger.info("[BuffAutoAcceptOffer] 出现错误, 稍后再试! ")
+                    SocketIO.send(self.socketio, Result.Result(2, "出现错误, 稍后再试!").to_json())
             except Exception as e:
                 self.logger.error(e, exc_info=True)
                 self.logger.info("[BuffAutoAcceptOffer] 出现未知错误, 稍后再试! ")
+                SocketIO.send(self.socketio, Result.Result(2, "出现未知错误, 稍后再试!").to_json())
             self.logger.info("[BuffAutoAcceptOffer] 将在{0}秒后再次检查待发货订单信息! ".format(str(interval)))
+            SocketIO.send(self.socketio, Result.Result(0, "将在{0}秒后再次检查待发货订单信息! ".format(str(interval))).to_json())
             time.sleep(interval)
