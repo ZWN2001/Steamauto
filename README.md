@@ -1,3 +1,5 @@
+说明：此代码落后主仓库非常多，如有需要可以参考实现形式对主仓库二次开发。思路是多进程，不要尝试python多线程，原因是全局解释器锁
+
 # Steamauto  
 ![Steamauto](https://socialify.git.ci/jiajiaxd/Steamauto/image?description=1&language=1&logo=https%3A%2F%2Ficons.bootcss.com%2Fassets%2Ficons%2Fsteam.svg&name=1&owner=1&theme=Light)
 <div align="center">
